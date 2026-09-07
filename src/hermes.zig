@@ -109,20 +109,6 @@ pub const Client = struct {
     }
 
     fn curlGet(self: *Client, url: []const u8) ![]u8 {
-        var argv: std.ArrayList([]const u8) = .empty;
-        defer argv.deinit(self.allocator);
-        try argv.append(self.allocator, "curl");
-        try argv.append(self.allocator, "-sS");
-        try argv.append(self.allocator, "--max-time");
-        try argv.append(self.allocator, "30");
-        if (self.api_key.len > 0) {
-            try argv.append(self.allocator, "-H");
-            const auth = try std.fmt.allocPrint(self.allocator, "Authorization: Bearer {s}", .{self.api_key});
-            defer self.allocator.free(auth);
-            try argv.append(self.allocator, auth);
-            // auth is freed before run — need owned copy in argv
-        }
-        // Rebuild properly with owned strings
         return self.curl(url, null);
     }
 

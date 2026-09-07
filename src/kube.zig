@@ -137,7 +137,7 @@ pub const Backend = struct {
     }
 
     pub fn k0sStatus(self: *Backend) ![]u8 {
-        const argv = try self.buildRemote(&.{"k0s", "status"});
+        const argv = try self.buildRemote(&.{ "k0s", "status" });
         defer freeArgv(self.allocator, argv);
         return self.runCapture(argv);
     }

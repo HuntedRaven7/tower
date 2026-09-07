@@ -63,8 +63,7 @@ pub const Backend = struct {
         };
     }
 
-    pub fn action(self: *Backend, kind: ResourceKind, verb: []const u8, id: []const u8) ![]u8 {
-        _ = kind;
+    pub fn action(self: *Backend, verb: []const u8, id: []const u8) ![]u8 {
         const argv = try self.buildArgv(&.{ verb, id });
         defer freeArgv(self.allocator, argv);
         return self.runCapture(argv);

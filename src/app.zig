@@ -120,7 +120,9 @@ pub const Model = struct {
             .tick => {
                 if (self.split == .ssh) self.ssh_session.poll();
                 if (self.needs_refresh) {
-                    self.refreshRows() catch {};
+                    self.refreshRows() catch |err| {
+                        self.setStatusFmt("refresh error: {s}", .{@errorName(err)});
+                    };
                     self.needs_refresh = false;
                 }
                 if (self.should_quit) return .quit;
@@ -132,7 +134,9 @@ pub const Model = struct {
                     if (self.confirm_modal.getResult()) |res| {
                         switch (res) {
                             .button_pressed => |idx| {
-                                if (idx == 0) self.runConfirm() catch {};
+                                if (idx == 0) self.runConfirm() catch |err| {
+                                    self.setStatusFmt("action error: {s}", .{@errorName(err)});
+                                };
                                 self.overlay = .none;
                                 self.confirm_action = .none;
                             },
@@ -167,7 +171,6 @@ pub const Model = struct {
                 }
 
                 if (self.focus == .split and self.split == .ssh) {
-                    if (isChar(k, 'q') and false) {} // never
                     if (isCtrl(k, 'b')) {
                         self.tmux_prefix = true;
                         return zz.Cmd(Msg).tickMs(200);
@@ -227,7 +230,9 @@ pub const Model = struct {
                     self.needs_refresh = true;
                     self.setStatus("refreshing…");
                 },
-                'i' => self.showInspect() catch {},
+                'i' => self.showInspect() catch |err| {
+                    self.setStatusFmt("inspect error: {s}", .{@errorName(err)});
+                },
                 'd' => self.promptDestructive(.stop),
                 'x' => self.promptDestructive(.rm),
                 '1' => self.setView(.containers),
@@ -251,7 +256,9 @@ pub const Model = struct {
                     self.focus = .main;
                     self.needs_refresh = true;
                 } else {
-                    self.showInspect() catch {};
+                    self.showInspect() catch |err| {
+                        self.setStatusFmt("inspect error: {s}", .{@errorName(err)});
+                    };
                 }
             },
             .escape => {
@@ -304,7 +311,11 @@ pub const Model = struct {
                 '"' => {
                     self.split = .hermes;
                     self.focus = .split;
-                    self.ensureHermes() catch {};
+                    self.ensureHermes() catch |err| {
+                        self.setStatusFmt("hermes error: {s}", .{@errorName(err)});
+                        self.split = .none;
+                        self.focus = .main;
+                    };
                     self.setStatus("split: hermes");
                 },
                 'h' => self.focus = .hosts,
@@ -739,14 +750,14 @@ pub const Model = struct {
             .none => {},
             .container_stop => |id| {
                 var backend = try container.Backend.detect(self.allocator, self.io, host);
-                const out = try backend.action(.containers, "stop", id);
+                const out = try backend.action("stop", id);
                 defer self.allocator.free(out);
                 self.setStatusFmt("stopped {s}", .{id});
                 self.needs_refresh = true;
             },
             .container_rm => |id| {
                 var backend = try container.Backend.detect(self.allocator, self.io, host);
-                const out = try backend.action(.containers, "rm", id);
+                const out = try backend.action("rm", id);
                 defer self.allocator.free(out);
                 self.setStatusFmt("removed {s}", .{id});
                 self.needs_refresh = true;
