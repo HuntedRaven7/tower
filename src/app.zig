@@ -897,22 +897,25 @@ pub const Model = struct {
         const tab_bar = try renderTabBar(self, alloc, ctx.width);
         if (self.window_mode == .exec) {
             const exec_view = try renderExecView(self, alloc, ctx.width, ctx.height);
-            return zz.joinVertical(alloc, &.{ tab_bar, exec_view });
+            const cmd_bar = try renderCommandBar(self, alloc, ctx.width);
+            return zz.joinVertical(alloc, &.{ tab_bar, exec_view, cmd_bar });
         }
 
         const areas = try zz.flex.layout(alloc, @intCast(ctx.width), @intCast(ctx.height), &.{
             .{ .constraint = .{ .fixed = 1 } }, // title
             .{ .constraint = .fill }, // body
             .{ .constraint = .{ .fixed = 1 } }, // status
+            .{ .constraint = .{ .fixed = 1 } }, // command bar
             .{ .constraint = .{ .fixed = if (self.overlay == .command or self.overlay == .filter) 1 else 0 } },
         }, .{ .direction = .column, .gap = 0 });
 
         const title = try renderTitle(self, alloc, areas[0].width);
         const body = try renderBody(self, alloc, areas[1].width, areas[1].height);
         const status = try renderStatus(self, alloc, areas[2].width);
-        const main_view = try zz.joinVertical(alloc, &.{ title, body, status });
+        const cmd_bar = try renderCommandBar(self, alloc, areas[3].width);
+        const main_view = try zz.joinVertical(alloc, &.{ title, body, status, cmd_bar });
         if (self.overlay == .command or self.overlay == .filter) {
-            const prompt = try renderPrompt(self, alloc, areas[3].width);
+            const prompt = try renderPrompt(self, alloc, areas[4].width);
             return zz.joinVertical(alloc, &.{ tab_bar, main_view, prompt });
         }
         return zz.joinVertical(alloc, &.{ tab_bar, main_view });
@@ -964,6 +967,21 @@ fn renderStatus(self: *const Model, alloc: std.mem.Allocator, width: usize) ![]c
     var style = zz.Style{};
     style = style.fg(zz.Color.gray(12)).inline_style(true);
     return style.render(alloc, self.status);
+}
+
+fn renderCommandBar(self: *const Model, alloc: std.mem.Allocator, width: usize) ![]const u8 {
+    const text = if (self.window_mode == .exec)
+        \\nav: hjkl  send: type  quit: q/Esc
+    else if (self.overlay == .filter)
+        \\filter: type  clear: BS  apply: Enter  cancel: Esc
+    else if (self.overlay == .command)
+        \\command: type  run: Enter  cancel: Esc
+    else
+        \\nav: hjkl g/G  select: Enter  inspect: i  stop: d  rm: x  refresh: r  filter: /  cmd: :  tab: Tab  quit: q
+    ;
+    var style = zz.Style{};
+    style = style.fg(zz.Color.gray(10)).inline_style(true);
+    return try style.render(alloc, pad(text, width));
 }
 
 fn renderExecView(self: *const Model, alloc: std.mem.Allocator, width: usize, height: usize) ![]const u8 {
