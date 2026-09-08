@@ -69,6 +69,10 @@ pub const Backend = struct {
         return self.runCapture(argv);
     }
 
+    pub fn start(self: *Backend, id: []const u8) ![]u8 {
+        return self.action("start", id);
+    }
+
     pub fn logs(self: *Backend, id: []const u8, tail: u32) ![]u8 {
         var tail_buf: [16]u8 = undefined;
         const tail_s = try std.fmt.bufPrint(&tail_buf, "{d}", .{tail});

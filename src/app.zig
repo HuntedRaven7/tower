@@ -264,6 +264,9 @@ pub const Model = struct {
                 },
                 'd' => self.promptDestructive(.stop),
                 'x' => self.promptDestructive(.rm),
+                's' => self.startContainer() catch |err| {
+                    self.setStatusFmt("start error: {s}", .{@errorName(err)});
+                },
                 '1' => self.setView(.containers),
                 '2' => self.setView(.images),
                 '3' => self.setView(.volumes),
@@ -779,6 +782,20 @@ pub const Model = struct {
         self.detail = text;
     }
 
+    fn startContainer(self: *Model) !void {
+        const row = self.filteredRow(self.selected) orelse return;
+        if (self.main_view != .containers) {
+            self.setStatus("start only available for containers");
+            return;
+        }
+        const host = self.cfg.selectedOrFirst(self.host_idx) orelse return;
+        var backend = try container.Backend.detect(self.allocator, self.io, host);
+        const out = try backend.start(row.id);
+        defer self.allocator.free(out);
+        self.setStatusFmt("started {s}", .{row.id});
+        self.needs_refresh = true;
+    }
+
     const DestructKind = enum { stop, rm };
 
     fn promptDestructive(self: *Model, kind: DestructKind) void {
@@ -896,7 +913,8 @@ pub const Model = struct {
 
         const tab_bar = try renderTabBar(self, alloc, ctx.width);
         if (self.window_mode == .exec) {
-            const exec_view = try renderExecView(self, alloc, ctx.width, ctx.height);
+            const exec_h = @max(@as(usize, 3), ctx.height -| 2);
+            const exec_view = try renderExecView(self, alloc, ctx.width, exec_h);
             const cmd_bar = try renderCommandBar(self, alloc, ctx.width);
             return zz.joinVertical(alloc, &.{ tab_bar, exec_view, cmd_bar });
         }
@@ -977,7 +995,7 @@ fn renderCommandBar(self: *const Model, alloc: std.mem.Allocator, width: usize) 
     else if (self.overlay == .command)
         \\command: type  run: Enter  cancel: Esc
     else
-        \\nav: hjkl g/G  select: Enter  inspect: i  stop: d  rm: x  refresh: r  filter: /  cmd: :  tab: Tab  quit: q
+        \\nav: hjkl g/G  select: Enter  inspect: i  stop: d  start: s  rm: x  refresh: r  filter: /  cmd: :  tab: Tab  quit: q
     ;
     var style = zz.Style{};
     style = style.fg(zz.Color.gray(10)).inline_style(true);
