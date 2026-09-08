@@ -81,6 +81,83 @@ pub fn truncate(s: []const u8, max: usize) []const u8 {
     return s[0..max];
 }
 
+fn hasBinary(io: std.Io, allocator: std.mem.Allocator, name: []const u8) !bool {
+    const result = std.process.run(allocator, io, .{
+        .argv = &.{ "which", name },
+    }) catch return false;
+    defer {
+        allocator.free(result.stdout);
+        allocator.free(result.stderr);
+    }
+    return switch (result.term) {
+        .exited => |code| code == 0,
+        else => false,
+    };
+}
+
+pub fn spawnTerminal(allocator: std.mem.Allocator, io: std.Io, cmd_argv: []const []const u8) !void {
+    const candidates = [_]struct { name: []const u8, args: []const []const u8 }{
+        .{ .name = "x-terminal-emulator", .args = &.{"-e"} },
+        .{ .name = "gnome-terminal", .args = &.{"--"} },
+        .{ .name = "kitty", .args = &.{ "--hold", "--" } },
+        .{ .name = "alacritty", .args = &.{"-e"} },
+        .{ .name = "xfce4-terminal", .args = &.{"-e"} },
+        .{ .name = "konsole", .args = &.{"-e"} },
+        .{ .name = "terminator", .args = &.{"-x"} },
+        .{ .name = "urxvt", .args = &.{"-e"} },
+    };
+
+    for (candidates) |c| {
+        if (try hasBinary(io, allocator, c.name)) {
+            var argv_list: std.ArrayList([]const u8) = .empty;
+            errdefer argv_list.deinit(allocator);
+            try argv_list.append(allocator, try allocator.dupe(u8, c.name));
+            for (c.args) |a| try argv_list.append(allocator, try allocator.dupe(u8, a));
+            try argv_list.appendSlice(allocator, cmd_argv);
+            _ = try std.process.spawn(io, .{
+                .argv = argv_list.items,
+                .stdin = .inherit,
+                .stdout = .inherit,
+                .stderr = .inherit,
+            });
+            return;
+        }
+    }
+
+    if (getenv("TERMINAL")) |term| {
+        var argv_list: std.ArrayList([]const u8) = .empty;
+        errdefer argv_list.deinit(allocator);
+        try argv_list.append(allocator, try allocator.dupe(u8, term));
+        try argv_list.append(allocator, try allocator.dupe(u8, "-e"));
+        try argv_list.appendSlice(allocator, cmd_argv);
+        _ = try std.process.spawn(io, .{
+            .argv = argv_list.items,
+            .stdin = .inherit,
+            .stdout = .inherit,
+            .stderr = .inherit,
+        });
+        return;
+    }
+
+    return error.NoTerminalFound;
+}
+
+pub fn spawnTmuxWindow(allocator: std.mem.Allocator, io: std.Io, name: []const u8, cmd_argv: []const []const u8) !void {
+    var tmux_argv: std.ArrayList([]const u8) = .empty;
+    defer tmux_argv.deinit(allocator);
+    try tmux_argv.append(allocator, try allocator.dupe(u8, "tmux"));
+    try tmux_argv.append(allocator, try allocator.dupe(u8, "new-window"));
+    try tmux_argv.append(allocator, try allocator.dupe(u8, "-n"));
+    try tmux_argv.append(allocator, try allocator.dupe(u8, name));
+    try tmux_argv.appendSlice(allocator, cmd_argv);
+    _ = try std.process.spawn(io, .{
+        .argv = tmux_argv.items,
+        .stdin = .inherit,
+        .stdout = .inherit,
+        .stderr = .inherit,
+    });
+}
+
 test "stripAnsi removes csi" {
     const allocator = std.testing.allocator;
     const cleaned = try stripAnsi(allocator, "\x1b[31mred\x1b[0m");

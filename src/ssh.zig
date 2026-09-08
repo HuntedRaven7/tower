@@ -92,6 +92,36 @@ pub const Session = struct {
         try self.output.appendSlice(self.allocator, banner);
     }
 
+    pub fn startCommand(self: *Session, argv: []const []const u8) !void {
+        self.stop();
+        self.output.clearRetainingCapacity();
+
+        const spawn_argv = try self.allocator.alloc([]const u8, argv.len);
+        errdefer self.allocator.free(spawn_argv);
+        for (argv, 0..) |a, i| spawn_argv[i] = try self.allocator.dupe(u8, a);
+
+        const child = std.process.spawn(self.io, .{
+            .argv = spawn_argv,
+            .stdin = .pipe,
+            .stdout = .pipe,
+            .stderr = .pipe,
+        }) catch |err| {
+            for (spawn_argv) |a| self.allocator.free(a);
+            self.allocator.free(spawn_argv);
+            self.setError(try std.fmt.allocPrint(self.allocator, "exec spawn failed: {s}", .{@errorName(err)}));
+            try self.output.appendSlice(self.allocator, self.last_error);
+            try self.output.append(self.allocator, '\n');
+            return err;
+        };
+
+        for (spawn_argv) |a| self.allocator.free(a);
+        self.allocator.free(spawn_argv);
+
+        self.child = child;
+        self.alive = true;
+        try self.output.appendSlice(self.allocator, "[tower] exec session\n");
+    }
+
     pub fn stop(self: *Session) void {
         if (self.child) |*c| {
             c.kill(self.io);

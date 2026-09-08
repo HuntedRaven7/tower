@@ -140,7 +140,7 @@ pub const Backend = struct {
         return try self.allocator.alloc(Row, 0);
     }
 
-    fn buildArgv(self: *Backend, rest: []const []const u8) ![]const []const u8 {
+    pub fn buildArgv(self: *Backend, rest: []const []const u8) ![]const []const u8 {
         var argv_list: std.ArrayList([]const u8) = .empty;
         errdefer argv_list.deinit(self.allocator);
 
@@ -168,6 +168,10 @@ pub const Backend = struct {
         return argv_list.toOwnedSlice(self.allocator);
     }
 
+    pub fn execArgv(self: *Backend, id: []const u8, shell: []const u8) ![]const []const u8 {
+        return self.buildArgv(&.{ "exec", "-it", id, shell });
+    }
+
     fn runCapture(self: *Backend, argv: []const []const u8) ![]u8 {
         const result = std.process.run(self.allocator, self.io, .{
             .argv = argv,
@@ -192,7 +196,7 @@ pub const Backend = struct {
     }
 };
 
-fn freeArgv(allocator: std.mem.Allocator, argv: []const []const u8) void {
+pub fn freeArgv(allocator: std.mem.Allocator, argv: []const []const u8) void {
     for (argv) |a| allocator.free(a);
     allocator.free(argv);
 }

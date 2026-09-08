@@ -10,6 +10,7 @@ const util = @import("util.zig");
 pub const Focus = enum { hosts, main, split };
 pub const SplitKind = enum { none, ssh, hermes, detail };
 pub const Overlay = enum { none, help, command, filter, confirm };
+pub const WindowMode = enum { main, exec };
 pub const MainView = enum {
     containers,
     images,
@@ -38,6 +39,8 @@ pub const Model = struct {
     focus: Focus = .main,
     split: SplitKind = .none,
     overlay: Overlay = .none,
+    window_mode: WindowMode = .main,
+    exec_row_id: []u8 = "",
     main_view: MainView = .containers,
     selected: usize = 0,
     scroll: usize = 0,
@@ -50,6 +53,8 @@ pub const Model = struct {
     rows: std.ArrayList(TableRow),
     contexts: std.ArrayList([]u8),
     context_idx: usize = 0,
+    tabs: std.ArrayList([]u8),
+    active_tab: usize = 0,
     confirm_action: ConfirmAction = .none,
     confirm_modal: zz.Modal = undefined,
     help_visible: bool = false,
@@ -93,22 +98,28 @@ pub const Model = struct {
             .detail = try allocator.dupe(u8, ""),
             .rows = .empty,
             .contexts = .empty,
+            .tabs = .empty,
             .confirm_modal = zz.Modal.init(),
             .ssh_session = session,
             .hermes_log = .empty,
             .engine_label = engine_label,
         };
+        try self.tabs.append(allocator, try allocator.dupe(u8, "MAIN"));
         try self.refreshRows();
         return zz.Cmd(Msg).tickMs(200);
     }
 
     pub fn deinit(self: *Model) void {
         self.clearRows();
+        if (self.rows.capacity > 0) self.rows.deinit(self.allocator);
         for (self.contexts.items) |c| self.allocator.free(c);
         self.contexts.deinit(self.allocator);
+        for (self.tabs.items) |t| self.allocator.free(t);
+        self.tabs.deinit(self.allocator);
         self.allocator.free(self.status);
         self.allocator.free(self.detail);
         self.allocator.free(self.engine_label);
+        self.allocator.free(self.exec_row_id);
         self.hermes_log.deinit(self.allocator);
         if (self.hermes_client) |*c| c.deinit();
         self.ssh_session.deinit();
@@ -119,6 +130,7 @@ pub const Model = struct {
         switch (msg) {
             .tick => {
                 if (self.split == .ssh) self.ssh_session.poll();
+                if (self.window_mode == .exec) self.ssh_session.poll();
                 if (self.needs_refresh) {
                     self.refreshRows() catch |err| {
                         self.setStatusFmt("refresh error: {s}", .{@errorName(err)});
@@ -129,6 +141,23 @@ pub const Model = struct {
                 return zz.Cmd(Msg).tickMs(200);
             },
             .key => |k| {
+                if (self.window_mode == .exec) {
+                    if (isChar(k, 'q') or isKey(k, .escape)) {
+                        self.ssh_session.stop();
+                        self.window_mode = .main;
+                        self.allocator.free(self.exec_row_id);
+                        self.exec_row_id = "";
+                        if (self.tabs.items.len > 1 and self.active_tab == self.tabs.items.len - 1) {
+                            _ = self.tabs.pop();
+                            self.active_tab = self.tabs.items.len - 1;
+                        }
+                        self.setStatus("exec exited");
+                        return zz.Cmd(Msg).tickMs(200);
+                    }
+                    self.forwardSshKey(k);
+                    return zz.Cmd(Msg).tickMs(200);
+                }
+
                 if (self.overlay == .confirm and self.confirm_modal.isVisible()) {
                     self.confirm_modal.handleKey(k);
                     if (self.confirm_modal.getResult()) |res| {
@@ -246,6 +275,19 @@ pub const Model = struct {
                 '9' => self.setView(.k0s),
                 else => {},
             },
+            .tab => {
+                if (self.tabs.items.len > 1) {
+                    self.active_tab = (self.active_tab + 1) % self.tabs.items.len;
+                    if (self.active_tab == 0) {
+                        self.window_mode = .main;
+                        self.allocator.free(self.exec_row_id);
+                        self.exec_row_id = "";
+                    } else {
+                        self.window_mode = .exec;
+                    }
+                    self.setStatusFmt("tab {s}", .{self.tabs.items[self.active_tab]});
+                }
+            },
             .up => self.moveSel(-1),
             .down => self.moveSel(1),
             .left => self.focus = .hosts,
@@ -255,6 +297,10 @@ pub const Model = struct {
                     // host already selected via j/k on hosts — enter focuses main
                     self.focus = .main;
                     self.needs_refresh = true;
+                } else if (self.main_view == .containers) {
+                    self.spawnContainerExec() catch |err| {
+                        self.setStatusFmt("exec error: {s}", .{@errorName(err)});
+                    };
                 } else {
                     self.showInspect() catch |err| {
                         self.setStatusFmt("inspect error: {s}", .{@errorName(err)});
@@ -665,6 +711,29 @@ pub const Model = struct {
         self.setStatusFmt("{s} · {d} rows", .{ @tagName(self.main_view), self.rows.items.len });
     }
 
+    fn spawnContainerExec(self: *Model) !void {
+        const row = self.filteredRow(self.selected) orelse return;
+        const host = self.cfg.selectedOrFirst(self.host_idx) orelse return;
+        var backend = try container.Backend.detect(self.allocator, self.io, host);
+        const shell = util.getenv("SHELL") orelse "/bin/bash";
+
+        if (!std.ascii.startsWithIgnoreCase(row.cols[2], "up")) {
+            self.setStatusFmt("container {s} is not running ({s})", .{ row.id, row.cols[2] });
+            return;
+        }
+
+        const argv = try backend.execArgv(row.id, shell);
+        defer container.freeArgv(self.allocator, argv);
+        try self.ssh_session.startCommand(argv);
+        self.allocator.free(self.exec_row_id);
+        self.exec_row_id = try self.allocator.dupe(u8, row.id);
+        const tab_name = try std.fmt.allocPrint(self.allocator, "EXEC: {s}", .{row.id});
+        try self.tabs.append(self.allocator, tab_name);
+        self.active_tab = self.tabs.items.len - 1;
+        self.window_mode = .exec;
+        self.setStatusFmt("exec: {s}", .{row.id});
+    }
+
     fn showInspect(self: *Model) !void {
         const row = self.filteredRow(self.selected) orelse return;
         const host = self.cfg.selectedOrFirst(self.host_idx) orelse return;
@@ -825,6 +894,12 @@ pub const Model = struct {
         }
         if (self.overlay == .help) return try renderHelp(alloc, ctx.width, ctx.height);
 
+        const tab_bar = try renderTabBar(self, alloc, ctx.width);
+        if (self.window_mode == .exec) {
+            const exec_view = try renderExecView(self, alloc, ctx.width, ctx.height);
+            return zz.joinVertical(alloc, &.{ tab_bar, exec_view });
+        }
+
         const areas = try zz.flex.layout(alloc, @intCast(ctx.width), @intCast(ctx.height), &.{
             .{ .constraint = .{ .fixed = 1 } }, // title
             .{ .constraint = .fill }, // body
@@ -835,14 +910,35 @@ pub const Model = struct {
         const title = try renderTitle(self, alloc, areas[0].width);
         const body = try renderBody(self, alloc, areas[1].width, areas[1].height);
         const status = try renderStatus(self, alloc, areas[2].width);
-
+        const main_view = try zz.joinVertical(alloc, &.{ title, body, status });
         if (self.overlay == .command or self.overlay == .filter) {
             const prompt = try renderPrompt(self, alloc, areas[3].width);
-            return zz.joinVertical(alloc, &.{ title, body, status, prompt });
+            return zz.joinVertical(alloc, &.{ tab_bar, main_view, prompt });
         }
-        return zz.joinVertical(alloc, &.{ title, body, status });
+        return zz.joinVertical(alloc, &.{ tab_bar, main_view });
     }
 };
+
+fn renderTabBar(self: *const Model, alloc: std.mem.Allocator, width: usize) ![]const u8 {
+    var parts: std.ArrayList([]const u8) = .empty;
+    defer parts.deinit(alloc);
+    for (self.tabs.items, 0..) |tab, i| {
+        const active = i == self.active_tab;
+        var style = zz.Style{};
+        if (active) {
+            style = style.bold(true).fg(zz.Color.black).bg(zz.Color.cyan).inline_style(true);
+        } else {
+            style = style.fg(zz.Color.gray(14)).inline_style(true);
+        }
+        const label = try std.fmt.allocPrint(alloc, " {s} ", .{tab});
+        try parts.append(alloc, try style.render(alloc, pad(label, 12)));
+        if (i < self.tabs.items.len - 1) {
+            try parts.append(alloc, try padLine(alloc, "", 1));
+        }
+    }
+    const joined = try zz.joinHorizontal(alloc, parts.items);
+    return padLine(alloc, joined, width);
+}
 
 fn renderTitle(self: *const Model, alloc: std.mem.Allocator, width: usize) ![]const u8 {
     _ = width;
@@ -868,6 +964,37 @@ fn renderStatus(self: *const Model, alloc: std.mem.Allocator, width: usize) ![]c
     var style = zz.Style{};
     style = style.fg(zz.Color.gray(12)).inline_style(true);
     return style.render(alloc, self.status);
+}
+
+fn renderExecView(self: *const Model, alloc: std.mem.Allocator, width: usize, height: usize) ![]const u8 {
+    const h = @max(height, 3);
+    var lines: std.ArrayList([]const u8) = .empty;
+    defer lines.deinit(alloc);
+
+    var title_style = zz.Style{};
+    title_style = title_style.bold(true).fg(zz.Color.yellow).inline_style(true);
+    const title = try std.fmt.allocPrint(alloc, " EXEC: {s} ", .{self.exec_row_id});
+    try lines.append(alloc, try title_style.render(alloc, pad(title, width)));
+
+    const content = try self.ssh_session.displayText(alloc);
+    var content_lines = std.mem.splitScalar(u8, content, '\n');
+    var buf: std.ArrayList([]const u8) = .empty;
+    defer buf.deinit(alloc);
+    while (content_lines.next()) |ln| try buf.append(alloc, ln);
+    const start = if (buf.items.len + 1 > h - 2) buf.items.len - (h - 2) else 0;
+    var body_style = zz.Style{};
+    body_style = body_style.inline_style(true);
+    for (buf.items[start..]) |ln| {
+        if (lines.items.len >= h - 1) break;
+        try lines.append(alloc, try body_style.render(alloc, pad(util.truncate(ln, width), width)));
+    }
+    while (lines.items.len < h - 1) try lines.append(alloc, try padLine(alloc, "", width));
+
+    var hint_style = zz.Style{};
+    hint_style = hint_style.fg(zz.Color.gray(12)).inline_style(true);
+    try lines.append(alloc, try hint_style.render(alloc, pad("ESC / q quit  TAB autocomplete", width)));
+
+    return zz.joinVertical(alloc, lines.items[0..@min(lines.items.len, h)]);
 }
 
 fn renderPrompt(self: *const Model, alloc: std.mem.Allocator, width: usize) ![]const u8 {
